@@ -11,23 +11,25 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "http://localhost:5175",
+  "http://localhost:5176",
 ];
+
 
 app.use(
   cors({
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error("Not allowed by CORS"));
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(null, false);
     },
     credentials: true,
   })
 );
 
-// Handle preflight requests
-app.options(/.*/, cors());
+
+// No need for app.options separately
+// app.use(cors(...)) already handles preflight when credentials/origin are configured
+
 
 app.use(cookieParser());
 app.use(express.json());
@@ -1015,6 +1017,11 @@ async function run() {
     // Test route
     app.get('/', (req, res) => {
       res.send('Hello World from Express + MongoDB!');
+    });
+
+    // ================= 404 Fallback (অজানা রুটের জন্য) =================
+    app.use((req, res) => {
+      res.status(404).json({ message: "Route not found" });
     });
 
   } finally {
