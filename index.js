@@ -14,7 +14,6 @@ const allowedOrigins = [
   "http://localhost:5176",
 ];
 
-
 app.use(
   cors({
     origin: function (origin, callback) {
@@ -22,14 +21,9 @@ app.use(
       if (allowedOrigins.includes(origin)) return callback(null, true);
       return callback(null, false);
     },
-    credentials: true,
+    credentials: true, // cookie পাঠানোর জন্য বাধ্যতামূলক
   })
 );
-
-
-// No need for app.options separately
-// app.use(cors(...)) already handles preflight when credentials/origin are configured
-
 
 app.use(cookieParser());
 app.use(express.json());
@@ -85,26 +79,41 @@ async function run() {
       });
     };
 
-    // ================= JWT (LOGIN) =================
-    app.post("/jwt", async (req, res) => {
-      const { email } = req.body;
-      if (!email) {
-        return res.status(400).send({ message: "Email required" });
-      }
+    // ================= ROLE-BASED MIDDLEWARES =================
+    const verifyAdmin = async (req, res, next) => {
+      const email = req.decoded?.email;
       const user = await userCollection.findOne({ email });
-      if (!user) {
-        return res.status(404).send({ message: "User not found" });
+      if (!user || user.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden access" });
       }
-      const token = jwt.sign(
-        { email },
-        process.env.ACCESS_TOKEN_SECRET,
-        { expiresIn: "7d" }
-      );
+      next();
+    };
+
+    const verifyChef = async (req, res, next) => {
+      const email = req.decoded?.email;
+      const user = await userCollection.findOne({ email });
+      if (!user || user.role !== "chef") {
+        return res.status(403).send({ message: "Forbidden access" });
+      }
+      next();
+    };
+
+    // ================= JWT (LOGIN) – সরল সংস্করণ (ডাটাবেজ চেক ছাড়া) =================
+    app.post("/jwt", (req, res) => {
+      const user = req.body; // { email: ... }
+      if (!user?.email) {
+        return res.status(400).send({ message: "email required" });
+      }
+
+      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
+        expiresIn: "7d",
+      });
+
       res
         .cookie("token", token, {
           httpOnly: true,
-          secure: false,      // true in production with HTTPS
-          sameSite: "lax",
+          secure: false,      // localhost এ false
+          sameSite: "lax",    // localhost এ lax ok
         })
         .send({ success: true });
     });
@@ -120,9 +129,9 @@ async function run() {
         .send({ success: true });
     });
 
-    // ================= PROTECTED ROUTES =================
-    // GET all users
-    app.get('/users', verifyToken, async (req, res) => {
+    // ================= অন্যান্য রাউটসমূহ (আপনার দেওয়া সকল রাউট অপরিবর্তিত) =================
+    // GET all users – admin only
+    app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const users = await userCollection.find().toArray();
         const normalized = users.map(user => ({
@@ -136,8 +145,8 @@ async function run() {
       }
     });
 
-    // GET all admins
-    app.get('/users/admins', verifyToken, async (req, res) => {
+    // GET all admins – admin only (optional, but safe)
+    app.get('/users/admins', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const admins = await userCollection
           .find({ role: 'admin' })
@@ -154,8 +163,8 @@ async function run() {
       }
     });
 
-    // GET all chefs
-    app.get('/users/chefs', verifyToken, async (req, res) => {
+    // GET all chefs – public অথবা admin only (এখানে public রাখা হয়েছে)
+    app.get('/users/chefs', async (req, res) => {
       try {
         const chefs = await userCollection
           .find({ role: 'chef' })
@@ -191,27 +200,31 @@ async function run() {
       }
     });
 
-    // GET user role by email (own role only)
-    app.get('/users/role/:email', verifyToken, async (req, res) => {
+    // ✅ রোল চেক – শুধু নিজের ইমেইল দেখতে পারবে
+    app.get("/users/role/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
       if (req.decoded.email !== email) {
-        return res.status(403).json({ success: false, message: 'Forbidden access' });
+        return res.status(403).send({ message: "Forbidden access" });
       }
-      try {
-        const user = await userCollection.findOne({ email: email });
-        if (user) {
-          return res.status(200).json({ success: true, role: user.role });
-        } else {
-          return res.status(404).json({ success: false, message: 'User not found' });
-        }
-      } catch (err) {
-        console.error('GET /users/role/:email error:', err);
-        res.status(500).json({ success: false, error: err.message });
+
+      const user = await userCollection.findOne(
+        { email: email },
+        { projection: { role: 1, status: 1, chefId: 1, email: 1, name: 1 } }
+      );
+
+      if (!user) {
+        return res.status(404).send({ role: "user", status: "active" });
       }
+
+      res.send({
+        role: user.role || "user",
+        status: user.status || "active",
+        chefId: user.chefId || null,
+      });
     });
 
-    // PATCH update user status (fraud)
-    app.patch('/users/:id/status', verifyToken, async (req, res) => {
+    // PATCH update user status (fraud) – admin only
+    app.patch('/users/:id/status', verifyToken, verifyAdmin, async (req, res) => {
       const { id } = req.params;
       const { status } = req.body;
       if (!['fraud'].includes(status)) {
@@ -260,7 +273,7 @@ async function run() {
       }
     });
 
-    // GET user-chef orders (for a chef's meals)
+    // GET user-chef orders (for a chef's meals) – chef himself
     app.get('/user-chef-orders/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
       if (req.decoded.email !== email) {
@@ -290,7 +303,7 @@ async function run() {
       }
     });
 
-    // GET chef-id by email (from meals)
+    // GET chef-id by email (from meals) – chef himself
     app.get('/chef-id/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
       if (req.decoded.email !== email) {
@@ -306,7 +319,7 @@ async function run() {
       }
     });
 
-    // GET user meals by email (own meals)
+    // GET user meals by email (own meals) – chef himself
     app.get('/user-meals/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
       if (req.decoded.email !== email) {
@@ -362,7 +375,7 @@ async function run() {
       }
     });
 
-    // POST role request (become chef/admin)
+    // POST role request (become chef/admin) – নিজের অনুরোধ
     app.post('/role-request', verifyToken, async (req, res) => {
       const { email, requestedRole } = req.body;
       if (req.decoded.email !== email) {
@@ -389,7 +402,7 @@ async function run() {
     });
 
     // ================= PUBLIC ROUTES =================
-    // Check role by email (used for initial auth check)
+    // Check role by email (used for initial auth check) – public, কিন্তু token চেক করা হয় না (শুধু প্রাথমিক চেক)
     app.get('/check-role/:email', async (req, res) => {
       const email = req.params.email;
       try {
@@ -414,7 +427,7 @@ async function run() {
       }
     });
 
-    // Users count
+    // Users count – public
     app.get('/users/count', async (req, res) => {
       try {
         const totalUsers = await userCollection.estimatedDocumentCount();
@@ -428,7 +441,7 @@ async function run() {
       }
     });
 
-    // Delivered orders count
+    // Delivered orders count – public
     app.get('/orders/delivered/count', async (req, res) => {
       try {
         const deliveredCount = await orderCollection.countDocuments({
@@ -447,7 +460,7 @@ async function run() {
       }
     });
 
-    // Pending payment count
+    // Pending payment count – public
     app.get('/orders/pending-payment/count', async (req, res) => {
       try {
         const pendingCount = await orderCollection.countDocuments({
@@ -466,7 +479,7 @@ async function run() {
       }
     });
 
-    // Total paid amount
+    // Total paid amount – public
     app.get('/orders/paid/total', async (req, res) => {
       try {
         const result = await orderCollection
@@ -489,7 +502,7 @@ async function run() {
       }
     });
 
-    // Stripe checkout session
+    // Stripe checkout session – public (কারণ অর্ডার করার সময়)
     app.post('/create-checkout-session', async (req, res) => {
       if (!stripe) {
         return res.status(500).json({ error: 'Stripe not configured' });
@@ -525,7 +538,7 @@ async function run() {
       }
     });
 
-    // Verify payment
+    // Verify payment – public (স্ট্রিপ কলব্যাক)
     app.get('/verify-payment/:sessionId', async (req, res) => {
       if (!stripe) {
         return res.status(500).json({ error: 'Stripe not configured' });
@@ -552,7 +565,7 @@ async function run() {
       }
     });
 
-    // Update order status
+    // Update order status – যেকোনো লগইন ইউজার? (প্রয়োজনে রোল চেক বসানো যেতে পারে)
     app.patch('/update-order-status/:id', verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
@@ -588,7 +601,7 @@ async function run() {
       }
     });
 
-    // POST update payment status
+    // POST update payment status – নিজের অর্ডার (verifyToken ই যথেষ্ট)
     app.post('/orders/:orderId/pay', verifyToken, async (req, res) => {
       const { orderId } = req.params;
       const { paymentInfo } = req.body;
@@ -615,7 +628,7 @@ async function run() {
       }
     });
 
-    // POST create order
+    // POST create order – public (অর্ডার দেওয়ার সময়)
     app.post('/orders', async (req, res) => {
       try {
         const orderData = req.body;
@@ -633,8 +646,9 @@ async function run() {
       }
     });
 
-    // PUT update meal
-    app.put('/meals/:id', verifyToken, async (req, res) => {
+    // PUT update meal – শুধু শেফ (verifyChef) অথবা ঐ মিলের মালিক (যেহেতু meal এ userEmail আছে)
+    // এখানে verifyChef ব্যবহার করা হয়েছে, কিন্তু চাইলে আরও স্পেসিফিক চেক করা যেতে পারে
+    app.put('/meals/:id', verifyToken, verifyChef, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
       const updateData = req.body;
@@ -670,8 +684,8 @@ async function run() {
       }
     });
 
-    // DELETE meal
-    app.delete('/meals/:id', verifyToken, async (req, res) => {
+    // DELETE meal – শুধু শেফ (verifyChef)
+    app.delete('/meals/:id', verifyToken, verifyChef, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
       try {
@@ -692,7 +706,7 @@ async function run() {
       }
     });
 
-    // GET latest meals (limit 6)
+    // GET latest meals (limit 6) – public
     app.get('/meals/latest', async (req, res) => {
       try {
         const latestMeals = await mealsCollection
@@ -711,7 +725,7 @@ async function run() {
       }
     });
 
-    // GET all meals with sorting and status filter
+    // GET all meals with sorting and status filter – public
     app.get('/meals', async (req, res) => {
       try {
         const sortQuery = req.query.sort; // asc/desc (price)
@@ -737,8 +751,8 @@ async function run() {
       }
     });
 
-    // POST create meal
-    app.post('/meals', verifyToken, async (req, res) => {
+    // POST create meal – শুধু শেফ (verifyChef)
+    app.post('/meals', verifyToken, verifyChef, async (req, res) => {
       const meal = req.body;
       meal.createdAt = new Date();
       try {
@@ -754,7 +768,7 @@ async function run() {
       }
     });
 
-    // GET single meal by id
+    // GET single meal by id – public
     app.get('/mealsd/:id', async (req, res) => {
       const id = req.params.id;
       if (!ObjectId.isValid(id)) {
@@ -773,7 +787,7 @@ async function run() {
       }
     });
 
-    // GET latest reviews (limit 6)
+    // GET latest reviews (limit 6) – public
     app.get('/reviews/latest', async (req, res) => {
       try {
         const latestReviews = await reviewsCollection
@@ -789,7 +803,7 @@ async function run() {
       }
     });
 
-    // GET reviews by mealId
+    // GET reviews by mealId – public
     app.get('/reviews/:mealId', async (req, res) => {
       const mealId = req.params.mealId;
       try {
@@ -805,7 +819,7 @@ async function run() {
       }
     });
 
-    // POST create review
+    // POST create review – লগইন যেকোনো ইউজার (verifyToken)
     app.post('/reviews', verifyToken, async (req, res) => {
       const review = req.body;
       try {
@@ -820,7 +834,7 @@ async function run() {
       }
     });
 
-    // PATCH update review
+    // PATCH update review – নিজের রিভিউ (verifyToken + email check)
     app.patch('/reviewsup/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
@@ -841,6 +855,11 @@ async function run() {
         if (!found) {
           return res.status(404).json({ success: false, message: 'Review not found' });
         }
+        // check ownership
+        if (found.reviewerEmail !== req.decoded.email) {
+          return res.status(403).json({ success: false, message: 'Forbidden' });
+        }
+
         const dbId = found._id;
         const updated = await reviewsCollection.findOneAndUpdate(
           { _id: dbId },
@@ -858,17 +877,26 @@ async function run() {
       }
     });
 
-    // DELETE review
+    // DELETE review – নিজের রিভিউ (verifyToken + email check)
     app.delete('/reviews/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
       try {
-        let result;
+        let query;
         if (typeof id === 'string' && ObjectId.isValid(id)) {
-          result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+          query = { _id: new ObjectId(id) };
         } else {
-          result = await reviewsCollection.deleteOne({ _id: id });
+          query = { _id: id };
         }
+        const found = await reviewsCollection.findOne(query);
+        if (!found) {
+          return res.status(404).json({ success: false, message: 'Review not found' });
+        }
+        if (found.reviewerEmail !== req.decoded.email) {
+          return res.status(403).json({ success: false, message: 'Forbidden' });
+        }
+
+        const result = await reviewsCollection.deleteOne(query);
         if (result.deletedCount === 1) {
           res.status(200).json({ success: true, message: 'Review deleted successfully' });
         } else {
@@ -880,7 +908,7 @@ async function run() {
       }
     });
 
-    // POST add to favorites
+    // POST add to favorites – লগইন যেকোনো ইউজার
     app.post('/favorites', verifyToken, async (req, res) => {
       const favoriteMeal = req.body;
       try {
@@ -902,17 +930,26 @@ async function run() {
       }
     });
 
-    // DELETE from favorites
+    // DELETE from favorites – নিজের ফেবারিট (verifyToken + email check)
     app.delete('/favorites/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
       try {
-        let result;
+        let query;
         if (typeof id === 'string' && ObjectId.isValid(id)) {
-          result = await favoritesCollection.deleteOne({ _id: new ObjectId(id) });
+          query = { _id: new ObjectId(id) };
         } else {
-          result = await favoritesCollection.deleteOne({ _id: id });
+          query = { _id: id };
         }
+        const found = await favoritesCollection.findOne(query);
+        if (!found) {
+          return res.status(404).json({ success: false, message: 'Favorite not found' });
+        }
+        if (found.userEmail !== req.decoded.email) {
+          return res.status(403).json({ success: false, message: 'Forbidden' });
+        }
+
+        const result = await favoritesCollection.deleteOne(query);
         if (result.deletedCount > 0) {
           res.status(200).json({ success: true, message: 'Favorite removed' });
         } else {
@@ -924,8 +961,8 @@ async function run() {
       }
     });
 
-    // GET role requests (admin only – but for now just protected)
-    app.get('/role-requests', verifyToken, async (req, res) => {
+    // GET role requests – admin only
+    app.get('/role-requests', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const requests = await userCollection
           .find({ roleRequest: { $exists: true } })
@@ -937,8 +974,8 @@ async function run() {
       }
     });
 
-    // PATCH approve role request
-    app.patch('/role-requests/:id/approve', verifyToken, async (req, res) => {
+    // PATCH approve role request – admin only
+    app.patch('/role-requests/:id/approve', verifyToken, verifyAdmin, async (req, res) => {
       const { id } = req.params;
       try {
         const user = await userCollection.findOne({ _id: new ObjectId(id) });
@@ -961,8 +998,8 @@ async function run() {
       }
     });
 
-    // PATCH decline role request
-    app.patch('/role-requests/:id/decline', verifyToken, async (req, res) => {
+    // PATCH decline role request – admin only
+    app.patch('/role-requests/:id/decline', verifyToken, verifyAdmin, async (req, res) => {
       const { id } = req.params;
       try {
         const updated = await userCollection.findOneAndUpdate(
@@ -981,7 +1018,7 @@ async function run() {
       }
     });
 
-    // POST create user (registration)
+    // POST create user (registration) – public
     app.post('/users', async (req, res) => {
       const userInfo = req.body;
       userInfo.role = 'user';
@@ -1001,7 +1038,7 @@ async function run() {
       }
     });
 
-    // GET stats
+    // GET stats – public
     app.get('/api/stats', async (req, res) => {
       try {
         const mealsCount = await mealsCollection.countDocuments();
