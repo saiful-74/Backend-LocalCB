@@ -6,18 +6,28 @@ require('dotenv').config();
 
 const app = express();
 
-// ✅ CORS ঠিক করা হলো - দুইটা পোর্টই যোগ করা হয়েছে
+// ================= CORS =================
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:5175",
+];
+
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:5174"],
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"));
+    },
     credentials: true,
   })
 );
 
-// ✅ Preflight request handle করার জন্য
+// Handle preflight requests
 app.options(/.*/, cors());
-
-
 
 app.use(cookieParser());
 app.use(express.json());
@@ -27,7 +37,6 @@ const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require("stripe")(stripeKey) : null;
 
 const port = process.env.PORT || 5000;
-
 const uri = process.env.MONGO_URI;
 
 const client = new MongoClient(uri, {
@@ -50,7 +59,7 @@ async function run() {
     const favoritesCollection = database.collection('favorites');
     const orderCollection = database.collection('order_collection');
 
-    // Helper: normalize ObjectId fields to strings for front-end consistency
+    // Helper: convert ObjectId fields to strings for front-end
     const normalizeDoc = (doc) => {
       if (!doc) return doc;
       const copy = { ...doc };
@@ -62,44 +71,37 @@ async function run() {
     // ================= VERIFY TOKEN MIDDLEWARE =================
     const verifyToken = (req, res, next) => {
       const token = req.cookies?.token;
-
       if (!token) {
         return res.status(401).send({ message: "Unauthorized access" });
       }
-
       jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
         if (err) {
           return res.status(401).send({ message: "Unauthorized access" });
         }
-
         req.decoded = decoded; // { email }
         next();
       });
     };
 
-    // ================= JWT CREATE =================
+    // ================= JWT (LOGIN) =================
     app.post("/jwt", async (req, res) => {
       const { email } = req.body;
-
       if (!email) {
         return res.status(400).send({ message: "Email required" });
       }
-
       const user = await userCollection.findOne({ email });
       if (!user) {
         return res.status(404).send({ message: "User not found" });
       }
-
       const token = jwt.sign(
         { email },
         process.env.ACCESS_TOKEN_SECRET,
         { expiresIn: "7d" }
       );
-
       res
         .cookie("token", token, {
           httpOnly: true,
-          secure: false,
+          secure: false,      // true in production with HTTPS
           sameSite: "lax",
         })
         .send({ success: true });
@@ -117,8 +119,7 @@ async function run() {
     });
 
     // ================= PROTECTED ROUTES =================
-
-    // GET all users (protected)
+    // GET all users
     app.get('/users', verifyToken, async (req, res) => {
       try {
         const users = await userCollection.find().toArray();
@@ -133,19 +134,17 @@ async function run() {
       }
     });
 
-    // GET all users with role 'admin' (protected)
+    // GET all admins
     app.get('/users/admins', verifyToken, async (req, res) => {
       try {
         const admins = await userCollection
           .find({ role: 'admin' })
           .project({ password: 0 })
           .toArray();
-
         const normalized = admins.map((a) => ({
           ...a,
           _id: a._id.toString(),
         }));
-
         res.status(200).json({ success: true, data: normalized });
       } catch (err) {
         console.error('GET /users/admins error:', err);
@@ -153,19 +152,17 @@ async function run() {
       }
     });
 
-    // GET all users with role 'chef' (protected)
+    // GET all chefs
     app.get('/users/chefs', verifyToken, async (req, res) => {
       try {
         const chefs = await userCollection
           .find({ role: 'chef' })
           .project({ password: 0 })
           .toArray();
-
         const normalized = chefs.map((c) => ({
           ...c,
           _id: c._id.toString(),
         }));
-
         res.status(200).json({ success: true, data: normalized });
       } catch (err) {
         console.error('GET /users/chefs error:', err);
@@ -173,15 +170,12 @@ async function run() {
       }
     });
 
-    // GET user by email (protected)
+    // GET user by email (own data only)
     app.get('/users/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-      
-      // Check if the requesting user is accessing their own data
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const user = await userCollection.findOne({ email: email });
         if (user) {
@@ -195,15 +189,12 @@ async function run() {
       }
     });
 
-    // GET user role by email (protected)
+    // GET user role by email (own role only)
     app.get('/users/role/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-      
-      // Check if the requesting user is accessing their own role
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const user = await userCollection.findOne({ email: email });
         if (user) {
@@ -217,26 +208,22 @@ async function run() {
       }
     });
 
-    // PATCH update user status (protected)
+    // PATCH update user status (fraud)
     app.patch('/users/:id/status', verifyToken, async (req, res) => {
       const { id } = req.params;
       const { status } = req.body;
-
       if (!['fraud'].includes(status)) {
         return res.status(400).json({ success: false, message: 'Invalid status' });
       }
-
       try {
         const updatedUser = await userCollection.findOneAndUpdate(
           { _id: new ObjectId(id) },
           { $set: { status } },
           { returnDocument: 'after' }
         );
-
         if (!updatedUser.value) {
           return res.status(404).json({ success: false, message: 'User not found' });
         }
-
         res.status(200).json({
           success: true,
           message: 'User marked as fraud',
@@ -248,27 +235,22 @@ async function run() {
       }
     });
 
-    // GET orders by user email (protected)
+    // GET orders by user email (own orders)
     app.get('/orders/:userEmail', verifyToken, async (req, res) => {
       const email = req.params.userEmail;
-
-      // Check if the requesting user is accessing their own orders
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const orders = await orderCollection
           .find({ userEmail: email })
           .sort({ orderTime: -1 })
           .toArray();
-
         const normalizedOrders = orders.map((order) => ({
           ...order,
           _id: order._id.toString(),
           orderTime: order.orderTime ? new Date(order.orderTime).toISOString() : null,
         }));
-
         res.status(200).json({ success: true, data: normalizedOrders });
       } catch (err) {
         console.error('GET /orders/:userEmail error:', err);
@@ -276,37 +258,29 @@ async function run() {
       }
     });
 
-    // GET user-chef orders (protected)
+    // GET user-chef orders (for a chef's meals)
     app.get('/user-chef-orders/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-
-      // Check if the requesting user is accessing their own chef orders
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const userMeals = await mealsCollection
           .find({ userEmail: email })
           .toArray();
-
         if (!userMeals.length) {
           return res.status(404).json({ success: false, message: 'No meals found for this user' });
         }
-
         const chefIds = userMeals.map((meal) => meal.chefId);
-
         const orders = await orderCollection
           .find({ chefId: { $in: chefIds } })
           .toArray();
-
         const normalizedOrders = orders.map((order) => ({
           ...order,
           _id: order._id?.toString(),
           foodId: order.foodId?.toString(),
           orderTime: order.orderTime ? new Date(order.orderTime).toISOString() : null,
         }));
-
         res.status(200).json({ success: true, data: normalizedOrders });
       } catch (err) {
         console.error('GET /user-chef-orders error:', err);
@@ -314,19 +288,15 @@ async function run() {
       }
     });
 
-    // GET chef-id by email (protected)
+    // GET chef-id by email (from meals)
     app.get('/chef-id/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-
-      // Check if the requesting user is accessing their own chef-id
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const meal = await mealsCollection.findOne({ userEmail: email });
         if (!meal) return res.send({ chefId: null });
-
         res.send({ chefId: meal.chefId || null });
       } catch (err) {
         console.error('GET /chef-id error:', err);
@@ -334,15 +304,12 @@ async function run() {
       }
     });
 
-    // GET user meals by email (protected)
+    // GET user meals by email (own meals)
     app.get('/user-meals/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-
-      // Check if the requesting user is accessing their own meals
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const meals = await mealsCollection.find({ userEmail: email }).toArray();
         const normalized = meals.map((m) => ({
@@ -356,15 +323,12 @@ async function run() {
       }
     });
 
-    // GET user reviews by email (protected)
+    // GET user reviews by email (own reviews)
     app.get('/user-reviews/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-
-      // Check if the requesting user is accessing their own reviews
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const userReviews = await reviewsCollection
           .find({ reviewerEmail: email })
@@ -378,15 +342,12 @@ async function run() {
       }
     });
 
-    // GET favorites by email (protected)
+    // GET favorites by email (own favorites)
     app.get('/favorites/:email', verifyToken, async (req, res) => {
       const email = req.params.email;
-
-      // Check if the requesting user is accessing their own favorites
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
       try {
         const favorites = await favoritesCollection
           .find({ userEmail: email })
@@ -399,18 +360,15 @@ async function run() {
       }
     });
 
-    // POST role request (protected)
+    // POST role request (become chef/admin)
     app.post('/role-request', verifyToken, async (req, res) => {
       const { email, requestedRole } = req.body;
-
-      // Check if the requesting user is submitting for themselves
       if (req.decoded.email !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
-
-      if (!['chef', 'admin'].includes(requestedRole))
+      if (!['chef', 'admin'].includes(requestedRole)) {
         return res.status(400).json({ success: false, message: 'Invalid role' });
-
+      }
       try {
         const updated = await userCollection.findOneAndUpdate(
           { email },
@@ -429,21 +387,17 @@ async function run() {
     });
 
     // ================= PUBLIC ROUTES =================
-
-    // Check role by email (public - used for initial auth check)
+    // Check role by email (used for initial auth check)
     app.get('/check-role/:email', async (req, res) => {
       const email = req.params.email;
-
       try {
         const user = await userCollection.findOne({ email });
-
         if (!user) {
           return res.status(404).json({
             success: false,
             message: 'User not found',
           });
         }
-
         res.status(200).json({
           success: true,
           email: user.email,
@@ -458,7 +412,7 @@ async function run() {
       }
     });
 
-    // Users count (public)
+    // Users count
     app.get('/users/count', async (req, res) => {
       try {
         const totalUsers = await userCollection.estimatedDocumentCount();
@@ -472,13 +426,12 @@ async function run() {
       }
     });
 
-    // Delivered orders count (public)
+    // Delivered orders count
     app.get('/orders/delivered/count', async (req, res) => {
       try {
         const deliveredCount = await orderCollection.countDocuments({
           orderStatus: { $regex: /^delivered$/i },
         });
-
         res.json({
           success: true,
           deliveredOrders: deliveredCount,
@@ -492,13 +445,12 @@ async function run() {
       }
     });
 
-    // Pending payment count (public)
+    // Pending payment count
     app.get('/orders/pending-payment/count', async (req, res) => {
       try {
         const pendingCount = await orderCollection.countDocuments({
           paymentStatus: { $regex: /^pending$/i },
         });
-
         res.json({
           success: true,
           pendingPayments: pendingCount,
@@ -512,7 +464,7 @@ async function run() {
       }
     });
 
-    // Total paid amount (public)
+    // Total paid amount
     app.get('/orders/paid/total', async (req, res) => {
       try {
         const result = await orderCollection
@@ -529,17 +481,18 @@ async function run() {
             },
           ])
           .toArray();
-
         res.send(result[0] || { totalPaidAmount: 0, totalOrders: 0 });
       } catch (error) {
         res.status(500).send({ message: 'Server Error' });
       }
     });
 
-    // Create checkout session (public - needed for payment)
+    // Stripe checkout session
     app.post('/create-checkout-session', async (req, res) => {
+      if (!stripe) {
+        return res.status(500).json({ error: 'Stripe not configured' });
+      }
       const { orderId, amount, email, name } = req.body;
-
       try {
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ['card'],
@@ -563,7 +516,6 @@ async function run() {
           success_url: `https://localchefbazaarbyhakimcolor.netlify.app/dashbord/payment-success?session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `https://localchefbazaarbyhakimcolor.netlify.app/dashbord/payment-cancel`,
         });
-
         res.json({ url: session.url });
       } catch (err) {
         console.error(err);
@@ -571,14 +523,15 @@ async function run() {
       }
     });
 
-    // Verify payment (public)
+    // Verify payment
     app.get('/verify-payment/:sessionId', async (req, res) => {
+      if (!stripe) {
+        return res.status(500).json({ error: 'Stripe not configured' });
+      }
       try {
         const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
-
         if (session.payment_status === 'paid') {
           const orderId = session.metadata.orderId;
-
           await orderCollection.updateOne(
             { _id: new ObjectId(orderId) },
             {
@@ -588,10 +541,8 @@ async function run() {
               },
             }
           );
-
           return res.json({ success: true });
         }
-
         res.json({ success: false });
       } catch (err) {
         console.error(err);
@@ -599,12 +550,11 @@ async function run() {
       }
     });
 
-    // Update order status (protected - will add role check later)
+    // Update order status
     app.patch('/update-order-status/:id', verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
         const { orderStatus } = req.body;
-
         const validStatus = ['pending', 'cancelled', 'accepted', 'delivered'];
         if (!validStatus.includes(orderStatus)) {
           return res.send({
@@ -612,12 +562,10 @@ async function run() {
             message: 'Invalid order status',
           });
         }
-
         const result = await orderCollection.updateOne(
           { _id: new ObjectId(id) },
           { $set: { orderStatus } }
         );
-
         if (result.modifiedCount > 0) {
           return res.send({
             success: true,
@@ -625,7 +573,6 @@ async function run() {
             result,
           });
         }
-
         res.send({
           success: false,
           message: 'Order status not updated',
@@ -639,26 +586,22 @@ async function run() {
       }
     });
 
-    // POST update payment status (protected)
+    // POST update payment status
     app.post('/orders/:orderId/pay', verifyToken, async (req, res) => {
       const { orderId } = req.params;
       const { paymentInfo } = req.body;
-
       try {
         let dbId;
         if (ObjectId.isValid(orderId)) dbId = new ObjectId(orderId);
         else dbId = orderId;
-
         const updated = await orderCollection.findOneAndUpdate(
           { _id: dbId },
           { $set: { paymentStatus: 'paid', paymentInfo } },
           { returnDocument: 'after' }
         );
-
         if (!updated.value) {
           return res.status(404).json({ success: false, message: 'Order not found' });
         }
-
         res.status(200).json({
           success: true,
           message: 'Payment successful',
@@ -670,12 +613,11 @@ async function run() {
       }
     });
 
-    // POST create order (public - users can order without login? Consider protecting)
+    // POST create order
     app.post('/orders', async (req, res) => {
       try {
         const orderData = req.body;
         const result = await orderCollection.insertOne(orderData);
-
         res.send({
           success: true,
           message: 'Order placed successfully!',
@@ -689,15 +631,13 @@ async function run() {
       }
     });
 
-    // PUT update meal (protected)
+    // PUT update meal
     app.put('/meals/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
       const updateData = req.body;
-
       try {
         const { _id, ...fieldsToUpdate } = updateData;
-
         if (fieldsToUpdate.price !== undefined)
           fieldsToUpdate.price = Number(fieldsToUpdate.price);
         if (fieldsToUpdate.rating !== undefined)
@@ -710,7 +650,6 @@ async function run() {
           queries.push({ _id: new ObjectId(id) });
         }
         queries.push({ _id: id });
-
         const matchQuery = queries.length > 1 ? { $or: queries } : queries[0];
 
         const updatedMeal = await mealsCollection.findOneAndUpdate(
@@ -718,11 +657,9 @@ async function run() {
           { $set: fieldsToUpdate },
           { returnDocument: 'after' }
         );
-
         if (!updatedMeal.value) {
           return res.status(404).json({ success: false, message: 'Meal not found' });
         }
-
         const meal = normalizeDoc(updatedMeal.value);
         res.status(200).json({ success: true, updatedMeal: meal });
       } catch (err) {
@@ -731,11 +668,10 @@ async function run() {
       }
     });
 
-    // DELETE meal (protected)
+    // DELETE meal
     app.delete('/meals/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
-
       try {
         let result;
         if (typeof id === 'string' && ObjectId.isValid(id)) {
@@ -743,7 +679,6 @@ async function run() {
         } else {
           result = await mealsCollection.deleteOne({ _id: id });
         }
-
         if (result.deletedCount === 1) {
           res.status(200).json({ success: true, message: 'Meal deleted successfully' });
         } else {
@@ -755,7 +690,7 @@ async function run() {
       }
     });
 
-    // GET latest meals (public)
+    // GET latest meals (limit 6)
     app.get('/meals/latest', async (req, res) => {
       try {
         const latestMeals = await mealsCollection
@@ -774,20 +709,25 @@ async function run() {
       }
     });
 
-    // GET all meals with sorting (public)
+    // GET all meals with sorting and status filter
     app.get('/meals', async (req, res) => {
       try {
-        const sortQuery = req.query.sort;
+        const sortQuery = req.query.sort; // asc/desc (price)
+        const status = req.query.status;  // "Available"
         let sortOption = {};
+        let query = {};
 
-        if (sortQuery === 'asc') {
-          sortOption = { price: 1 };
-        } else if (sortQuery === 'desc') {
-          sortOption = { price: -1 };
+        if (status) {
+          query.status = { $regex: `^${status}$`, $options: "i" };
         }
+        if (sortQuery === 'asc') sortOption = { price: 1 };
+        if (sortQuery === 'desc') sortOption = { price: -1 };
 
-        const meals = await mealsCollection.find().sort(sortOption).toArray();
-        const normalized = meals.map((m) => ({ ...m, _id: m._id.toString() }));
+        const meals = await mealsCollection.find(query).sort(sortOption).toArray();
+        const normalized = meals.map((m) => ({
+          ...m,
+          _id: m._id.toString(),
+        }));
         res.status(200).json({ success: true, data: normalized });
       } catch (err) {
         console.error('GET /meals error:', err);
@@ -795,11 +735,10 @@ async function run() {
       }
     });
 
-    // POST create meal (protected)
+    // POST create meal
     app.post('/meals', verifyToken, async (req, res) => {
       const meal = req.body;
       meal.createdAt = new Date();
-
       try {
         const result = await mealsCollection.insertOne(meal);
         res.status(201).json({
@@ -813,21 +752,17 @@ async function run() {
       }
     });
 
-    // GET single meal by id (public)
+    // GET single meal by id
     app.get('/mealsd/:id', async (req, res) => {
       const id = req.params.id;
-
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ success: false, message: 'Invalid Meal ID' });
       }
-
       try {
         const meal = await mealsCollection.findOne({ _id: new ObjectId(id) });
-
         if (!meal) {
           return res.status(404).json({ success: false, message: 'Meal not found' });
         }
-
         meal._id = meal._id.toString();
         res.status(200).json(meal);
       } catch (err) {
@@ -836,7 +771,7 @@ async function run() {
       }
     });
 
-    // GET latest reviews (public)
+    // GET latest reviews (limit 6)
     app.get('/reviews/latest', async (req, res) => {
       try {
         const latestReviews = await reviewsCollection
@@ -852,7 +787,7 @@ async function run() {
       }
     });
 
-    // GET reviews by mealId (public)
+    // GET reviews by mealId
     app.get('/reviews/:mealId', async (req, res) => {
       const mealId = req.params.mealId;
       try {
@@ -868,10 +803,9 @@ async function run() {
       }
     });
 
-    // POST create review (protected)
+    // POST create review
     app.post('/reviews', verifyToken, async (req, res) => {
       const review = req.body;
-
       try {
         const result = await reviewsCollection.insertOne(review);
         res.status(201).json({
@@ -884,12 +818,11 @@ async function run() {
       }
     });
 
-    // PATCH update review (protected)
+    // PATCH update review
     app.patch('/reviewsup/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
       const { rating, comment } = req.body;
-
       try {
         const updates = {};
         if (rating !== undefined) updates.rating = Number(rating);
@@ -906,18 +839,15 @@ async function run() {
         if (!found) {
           return res.status(404).json({ success: false, message: 'Review not found' });
         }
-
         const dbId = found._id;
         const updated = await reviewsCollection.findOneAndUpdate(
           { _id: dbId },
           { $set: updates },
           { returnDocument: 'after' }
         );
-
         if (!updated.value) {
           return res.status(500).json({ success: false, message: 'Update failed' });
         }
-
         const review = normalizeDoc(updated.value);
         res.status(200).json({ success: true, updatedReview: review });
       } catch (err) {
@@ -926,11 +856,10 @@ async function run() {
       }
     });
 
-    // DELETE review (protected)
+    // DELETE review
     app.delete('/reviews/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
-
       try {
         let result;
         if (typeof id === 'string' && ObjectId.isValid(id)) {
@@ -938,7 +867,6 @@ async function run() {
         } else {
           result = await reviewsCollection.deleteOne({ _id: id });
         }
-
         if (result.deletedCount === 1) {
           res.status(200).json({ success: true, message: 'Review deleted successfully' });
         } else {
@@ -950,10 +878,9 @@ async function run() {
       }
     });
 
-    // POST add to favorites (protected)
+    // POST add to favorites
     app.post('/favorites', verifyToken, async (req, res) => {
       const favoriteMeal = req.body;
-
       try {
         const exists = await favoritesCollection.findOne({
           userEmail: favoriteMeal.userEmail,
@@ -962,7 +889,6 @@ async function run() {
         if (exists) {
           return res.status(400).json({ success: false, message: 'Meal already in favorites' });
         }
-
         const result = await favoritesCollection.insertOne(favoriteMeal);
         res.status(201).json({
           success: true,
@@ -974,11 +900,10 @@ async function run() {
       }
     });
 
-    // DELETE from favorites (protected)
+    // DELETE from favorites
     app.delete('/favorites/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
-
       try {
         let result;
         if (typeof id === 'string' && ObjectId.isValid(id)) {
@@ -986,7 +911,6 @@ async function run() {
         } else {
           result = await favoritesCollection.deleteOne({ _id: id });
         }
-
         if (result.deletedCount > 0) {
           res.status(200).json({ success: true, message: 'Favorite removed' });
         } else {
@@ -998,7 +922,7 @@ async function run() {
       }
     });
 
-    // GET role requests (protected - admin only, but for now just protected)
+    // GET role requests (admin only – but for now just protected)
     app.get('/role-requests', verifyToken, async (req, res) => {
       try {
         const requests = await userCollection
@@ -1011,15 +935,14 @@ async function run() {
       }
     });
 
-    // PATCH approve role request (protected)
+    // PATCH approve role request
     app.patch('/role-requests/:id/approve', verifyToken, async (req, res) => {
       const { id } = req.params;
-
       try {
         const user = await userCollection.findOne({ _id: new ObjectId(id) });
-        if (!user || !user.roleRequest)
+        if (!user || !user.roleRequest) {
           return res.status(404).json({ success: false, message: 'No pending request' });
-
+        }
         const updated = await userCollection.findOneAndUpdate(
           { _id: new ObjectId(id) },
           { $set: { role: user.roleRequest }, $unset: { roleRequest: '' } },
@@ -1036,10 +959,9 @@ async function run() {
       }
     });
 
-    // PATCH decline role request (protected)
+    // PATCH decline role request
     app.patch('/role-requests/:id/decline', verifyToken, async (req, res) => {
       const { id } = req.params;
-
       try {
         const updated = await userCollection.findOneAndUpdate(
           { _id: new ObjectId(id) },
@@ -1057,12 +979,11 @@ async function run() {
       }
     });
 
-    // POST create user (public - registration)
+    // POST create user (registration)
     app.post('/users', async (req, res) => {
       const userInfo = req.body;
       userInfo.role = 'user';
       userInfo.createdAt = new Date();
-
       try {
         const result = await userCollection.insertOne(userInfo);
         res.status(201).json({
@@ -1078,13 +999,12 @@ async function run() {
       }
     });
 
-    // GET stats (public)
+    // GET stats
     app.get('/api/stats', async (req, res) => {
       try {
         const mealsCount = await mealsCollection.countDocuments();
         const reviewsCount = await reviewsCollection.countDocuments();
         const favoritesCount = await favoritesCollection.countDocuments();
-
         res.json({ success: true, mealsCount, reviewsCount, favoritesCount });
       } catch (error) {
         console.error('GET /api/stats error:', error);
@@ -1098,7 +1018,7 @@ async function run() {
     });
 
   } finally {
-    // Don't close the connection
+    // Do not close the connection
   }
 }
 
