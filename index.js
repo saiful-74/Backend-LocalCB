@@ -19,10 +19,9 @@ app.use(
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
-      // return an error when origin is not allowed – no silent failure
       return callback(new Error("Not allowed by CORS"), false);
     },
-    credentials: true, // required for cookies
+    credentials: true,
   })
 );
 
@@ -110,7 +109,7 @@ async function run() {
       next();
     };
 
-    // ================= JWT (LOGIN) - cookie set =================
+    // ================= JWT (LOGIN) - cookie set (production safe) =================
     app.post("/jwt", (req, res) => {
       const { email } = req.body;
 
@@ -124,22 +123,26 @@ async function run() {
         { expiresIn: "1d" }
       );
 
+      const isProd = process.env.NODE_ENV === "production";
+
       res
         .cookie("token", token, {
           httpOnly: true,
-          secure: false,   // for localhost
-          sameSite: "lax",
+          secure: isProd,              // true on https, false on localhost
+          sameSite: isProd ? "none" : "lax",
         })
         .send({ success: true });
     });
 
-    // ================= LOGOUT =================
+    // ================= LOGOUT (production safe) =================
     app.post("/logout", (req, res) => {
+      const isProd = process.env.NODE_ENV === "production";
+
       res
         .clearCookie("token", {
           httpOnly: true,
-          secure: false,
-          sameSite: "lax",
+          secure: isProd,
+          sameSite: isProd ? "none" : "lax",
         })
         .send({ success: true });
     });
@@ -291,7 +294,7 @@ async function run() {
       }
     });
 
-    // ========== ইউজার-শেফ অর্ডার (ইমেইল ম্যাচ চেক সহ) – already fixed ==========
+    // ========== ইউজার-শেফ অর্ডার (ইমেইল ম্যাচ চেক সহ) – only one copy ==========
     app.get('/user-chef-orders/:email', verifyToken, async (req, res) => {
       const email = decodeURIComponent(req.params.email).toLowerCase();
       const decodedEmail = req.decoded?.email?.toLowerCase() || '';
