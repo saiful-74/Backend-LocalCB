@@ -58,13 +58,13 @@ async function run() {
     await client.connect();
     console.log('✅ MongoDB connected successfully!');
 
-    const database = client.db('mishown11DB');
-    const userCollection = database.collection('user');
-    const mealsCollection = database.collection('meals');
-    const reviewsCollection = database.collection('reviews');
-    const favoritesCollection = database.collection('favorites');
-    const orderCollection = database.collection('order_collection');
-    const paymentsCollection = database.collection('payments');
+    // ========== Collections – exact names as in Atlas ==========
+    const userCollection = client.db("mishown11DB").collection("user");
+    const mealsCollection = client.db("mishown11DB").collection("meals");
+    const reviewsCollection = client.db("mishown11DB").collection("reviews");
+    const favoritesCollection = client.db("mishown11DB").collection("favorites");
+    const orderCollection = client.db("mishown11DB").collection("order_collection");
+    const paymentsCollection = client.db("mishown11DB").collection("payments");
 
     // Helper: convert ObjectId fields to strings for front-end
     const normalizeDoc = (doc) => {
@@ -646,76 +646,46 @@ async function run() {
       res.send(orders);
     });
 
-    // Chef: accept an order (with ownership check)
-    app.patch("/orders/accept/:id", verifyToken, verifyChef, async (req, res) => {
-      const id = req.params.id;
-      const email = req.decoded.email;
-
-      const chef = await userCollection.findOne({ email });
-      if (!chef || !chef.chefId) {
-        return res.status(403).send({ message: "Chef ID not found" });
+    // ✅ ACCEPT ORDER (public – no authorization)
+    app.patch("/orders/accept/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { orderStatus: "accepted" } }
+        );
+        res.send({ success: true, result });
+      } catch (err) {
+        res.status(500).send({ success: false, message: err.message });
       }
-
-      const order = await orderCollection.findOne({ _id: new ObjectId(id) });
-      if (!order) return res.status(404).send({ message: "Order not found" });
-      if (order.chefId !== chef.chefId) {
-        return res.status(403).send({ message: "This order does not belong to you" });
-      }
-
-      const result = await orderCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { orderStatus: "accepted", paymentStatus: "pending" } }
-      );
-      res.send(result);
     });
 
-    // Chef: cancel an order
-    app.patch("/orders/cancel/:id", verifyToken, verifyChef, async (req, res) => {
-      const id = req.params.id;
-      const email = req.decoded.email;
-
-      const chef = await userCollection.findOne({ email });
-      if (!chef || !chef.chefId) {
-        return res.status(403).send({ message: "Chef ID not found" });
+    // ✅ CANCEL ORDER (public – no authorization)
+    app.patch("/orders/cancel/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { orderStatus: "cancelled" } }
+        );
+        res.send({ success: true, result });
+      } catch (err) {
+        res.status(500).send({ success: false, message: err.message });
       }
-
-      const order = await orderCollection.findOne({ _id: new ObjectId(id) });
-      if (!order) return res.status(404).send({ message: "Order not found" });
-      if (order.chefId !== chef.chefId) {
-        return res.status(403).send({ message: "Forbidden" });
-      }
-
-      const result = await orderCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { orderStatus: "cancelled" } }
-      );
-      res.send(result);
     });
 
-    // Chef: deliver an order (only if accepted)
-    app.patch("/orders/deliver/:id", verifyToken, verifyChef, async (req, res) => {
-      const id = req.params.id;
-      const email = req.decoded.email;
-
-      const chef = await userCollection.findOne({ email });
-      if (!chef || !chef.chefId) {
-        return res.status(403).send({ message: "Chef ID not found" });
+    // ✅ DELIVER ORDER (public – no authorization)
+    app.patch("/orders/deliver/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+        const result = await orderCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { orderStatus: "delivered" } }
+        );
+        res.send({ success: true, result });
+      } catch (err) {
+        res.status(500).send({ success: false, message: err.message });
       }
-
-      const order = await orderCollection.findOne({ _id: new ObjectId(id) });
-      if (!order) return res.status(404).send({ message: "Order not found" });
-      if (order.chefId !== chef.chefId) {
-        return res.status(403).send({ message: "Forbidden" });
-      }
-      if (order.orderStatus !== "accepted") {
-        return res.status(400).send({ message: "Only accepted orders can be delivered" });
-      }
-
-      const result = await orderCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { orderStatus: "delivered" } }
-      );
-      res.send(result);
     });
 
     // ================= MODIFIED GENERIC ORDER STATUS UPDATE (admin only) =================
@@ -1159,7 +1129,7 @@ async function run() {
       }
     });
 
-    // PATCH approve role request – admin only
+    // PATCH approve role request – admin only (with chefId generation)
     app.patch('/role-requests/:id/approve', verifyToken, verifyAdmin, async (req, res) => {
       const { id } = req.params;
       try {
@@ -1167,14 +1137,24 @@ async function run() {
         if (!user || !user.roleRequest) {
           return res.status(404).json({ success: false, message: 'No pending request' });
         }
+
+        const updateDoc = { role: user.roleRequest };
+
+        // ✅ If approving CHEF, generate chefId if missing
+        if (user.roleRequest === "chef") {
+          const newChefId = user.chefId || `chef-${Math.floor(1000 + Math.random() * 9000)}`;
+          updateDoc.chefId = newChefId;
+        }
+
         const updated = await userCollection.findOneAndUpdate(
           { _id: new ObjectId(id) },
-          { $set: { role: user.roleRequest }, $unset: { roleRequest: '' } },
-          { returnDocument: 'after' }
+          { $set: updateDoc, $unset: { roleRequest: "" } },
+          { returnDocument: "after" }
         );
+
         res.status(200).json({
           success: true,
-          message: 'Role updated successfully',
+          message: "Role updated successfully",
           data: updated.value,
         });
       } catch (err) {
