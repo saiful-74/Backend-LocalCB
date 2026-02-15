@@ -12,18 +12,31 @@ const allowedOrigins = [
   "http://localhost:5174",
   "http://localhost:5175",
   "http://localhost:5176",
+
+  // ✅ your netlify domain
+  "https://misswer11.netlify.app",
 ];
 
 app.use(
   cors({
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
+
+      // ✅ allow exact domains
       if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error("Not allowed by CORS"), false);
+
+      // ✅ allow any netlify subdomain (optional but useful)
+      if (origin.endsWith(".netlify.app")) return callback(null, true);
+
+      // ✅ allow vercel preview domains (optional)
+      if (origin.endsWith(".vercel.app")) return callback(null, true);
+
+      return callback(new Error("Not allowed by CORS"));
     },
     credentials: true,
   })
 );
+
 
 app.use(cookieParser());
 app.use(express.json());
