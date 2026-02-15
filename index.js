@@ -129,7 +129,7 @@ async function run() {
         .send({ success: true });
     });
 
-    // ================= অন্যান্য রাউটসমূহ (আপনার দেওয়া সকল রাউট অপরিবর্তিত) =================
+    // ================= অন্যান্য রাউটসমূহ =================
     // GET all users – admin only
     app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
       try {
@@ -163,7 +163,7 @@ async function run() {
       }
     });
 
-    // GET all chefs – public অথবা admin only (এখানে public রাখা হয়েছে)
+    // GET all chefs – public
     app.get('/users/chefs', async (req, res) => {
       try {
         const chefs = await userCollection
@@ -181,26 +181,8 @@ async function run() {
       }
     });
 
-    // GET user by email (own data only)
-    app.get('/users/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
-        return res.status(403).json({ success: false, message: 'Forbidden access' });
-      }
-      try {
-        const user = await userCollection.findOne({ email: email });
-        if (user) {
-          return res.status(200).json({ success: true, data: user });
-        } else {
-          return res.status(404).json({ success: false, message: 'User not found' });
-        }
-      } catch (err) {
-        console.error('GET /users/:email error:', err);
-        res.status(500).json({ success: false, error: err.message });
-      }
-    });
-
-    // ✅ রোল চেক – শুধু নিজের ইমেইল দেখতে পারবে
+    // ========== রোল চেক – শুধু নিজের ইমেইল দেখতে পারবে ==========
+    // এই রাউটটি /users/:email এর আগে থাকতে হবে
     app.get("/users/role/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
       if (req.decoded.email !== email) {
@@ -221,6 +203,25 @@ async function run() {
         status: user.status || "active",
         chefId: user.chefId || null,
       });
+    });
+
+    // GET user by email (own data only)
+    app.get('/users/:email', verifyToken, async (req, res) => {
+      const email = req.params.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).json({ success: false, message: 'Forbidden access' });
+      }
+      try {
+        const user = await userCollection.findOne({ email: email });
+        if (user) {
+          return res.status(200).json({ success: true, data: user });
+        } else {
+          return res.status(404).json({ success: false, message: 'User not found' });
+        }
+      } catch (err) {
+        console.error('GET /users/:email error:', err);
+        res.status(500).json({ success: false, error: err.message });
+      }
     });
 
     // PATCH update user status (fraud) – admin only
@@ -402,7 +403,7 @@ async function run() {
     });
 
     // ================= PUBLIC ROUTES =================
-    // Check role by email (used for initial auth check) – public, কিন্তু token চেক করা হয় না (শুধু প্রাথমিক চেক)
+    // Check role by email (used for initial auth check) – public, কিন্তু token চেক করা হয় না
     app.get('/check-role/:email', async (req, res) => {
       const email = req.params.email;
       try {
@@ -502,7 +503,7 @@ async function run() {
       }
     });
 
-    // Stripe checkout session – public (কারণ অর্ডার করার সময়)
+    // Stripe checkout session – public
     app.post('/create-checkout-session', async (req, res) => {
       if (!stripe) {
         return res.status(500).json({ error: 'Stripe not configured' });
@@ -565,7 +566,7 @@ async function run() {
       }
     });
 
-    // Update order status – যেকোনো লগইন ইউজার? (প্রয়োজনে রোল চেক বসানো যেতে পারে)
+    // Update order status
     app.patch('/update-order-status/:id', verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
@@ -601,7 +602,7 @@ async function run() {
       }
     });
 
-    // POST update payment status – নিজের অর্ডার (verifyToken ই যথেষ্ট)
+    // POST update payment status – নিজের অর্ডার
     app.post('/orders/:orderId/pay', verifyToken, async (req, res) => {
       const { orderId } = req.params;
       const { paymentInfo } = req.body;
@@ -628,7 +629,7 @@ async function run() {
       }
     });
 
-    // POST create order – public (অর্ডার দেওয়ার সময়)
+    // POST create order – public
     app.post('/orders', async (req, res) => {
       try {
         const orderData = req.body;
@@ -646,8 +647,7 @@ async function run() {
       }
     });
 
-    // PUT update meal – শুধু শেফ (verifyChef) অথবা ঐ মিলের মালিক (যেহেতু meal এ userEmail আছে)
-    // এখানে verifyChef ব্যবহার করা হয়েছে, কিন্তু চাইলে আরও স্পেসিফিক চেক করা যেতে পারে
+    // PUT update meal – শুধু শেফ
     app.put('/meals/:id', verifyToken, verifyChef, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
@@ -684,7 +684,7 @@ async function run() {
       }
     });
 
-    // DELETE meal – শুধু শেফ (verifyChef)
+    // DELETE meal – শুধু শেফ
     app.delete('/meals/:id', verifyToken, verifyChef, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
@@ -751,7 +751,7 @@ async function run() {
       }
     });
 
-    // POST create meal – শুধু শেফ (verifyChef)
+    // POST create meal – শুধু শেফ
     app.post('/meals', verifyToken, verifyChef, async (req, res) => {
       const meal = req.body;
       meal.createdAt = new Date();
@@ -832,34 +832,17 @@ async function run() {
           .sort({ date: -1 })
           .toArray();
         const normalized = reviews.map((r) => normalizeDoc(r));
-        res.send(normalized); // সরাসরি অ্যারে রিটার্ন (প্রদত্ত স্পেক অনুযায়ী)
+        res.send(normalized); // সরাসরি অ্যারে রিটার্ন
       } catch (err) {
         console.error('GET /reviews?foodId error:', err);
         res.status(500).json({ success: false, error: err.message });
       }
     });
 
-    // GET my reviews – নিজের সব রিভিউ
-    app.get('/my-reviews', verifyToken, async (req, res) => {
-      const email = req.decoded.email;
-      try {
-        const reviews = await reviewsCollection
-          .find({ reviewerEmail: email })
-          .sort({ date: -1 })
-          .toArray();
-        const normalized = reviews.map((r) => normalizeDoc(r));
-        res.send(normalized);
-      } catch (err) {
-        console.error('GET /my-reviews error:', err);
-        res.status(500).json({ success: false, error: err.message });
-      }
-    });
-
-    // POST create review – লগইন যেকোনো ইউজার (verifyToken)
+    // POST create review – লগইন যেকোনো ইউজার
     app.post('/reviews', verifyToken, async (req, res) => {
       const review = req.body;
 
-      // basic validation
       if (!review.foodId || !review.rating || !review.comment) {
         return res.status(400).send({ message: "foodId, rating, comment required" });
       }
@@ -870,7 +853,7 @@ async function run() {
         reviewerImage: review.reviewerImage || "",
         rating: Number(review.rating),
         comment: review.comment,
-        reviewerEmail: req.decoded.email,       // ✅ secure
+        reviewerEmail: req.decoded.email,
         date: new Date().toISOString(),
       };
 
@@ -945,68 +928,67 @@ async function run() {
         }
 
         const result = await reviewsCollection.deleteOne(query);
-        res.send(result); // { acknowledged: true, deletedCount: 1 }
+        res.send(result);
       } catch (err) {
         console.error('DELETE /reviews error:', err);
         res.status(500).json({ success: false, error: err.message });
       }
     });
 
-    // ===== পূর্বের PATCH /reviewsup/:id সরিয়ে দেওয়া হয়েছে (এখন /reviews/:id ব্যবহার করুন) =====
+    // ================= FAVORITES ROUTES (UPDATED) =================
 
-    // POST add to favorites – লগইন যেকোনো ইউজার
-    app.post('/favorites', verifyToken, async (req, res) => {
-      const favoriteMeal = req.body;
-      try {
-        const exists = await favoritesCollection.findOne({
-          userEmail: favoriteMeal.userEmail,
-          mealId: favoriteMeal.mealId,
-        });
-        if (exists) {
-          return res.status(400).json({ success: false, message: 'Meal already in favorites' });
-        }
-        const result = await favoritesCollection.insertOne(favoriteMeal);
-        res.status(201).json({
-          success: true,
-          data: { ...favoriteMeal, _id: result.insertedId.toString() },
-        });
-      } catch (err) {
-        console.error('POST /favorites error:', err);
-        res.status(500).json({ success: false, error: err.message });
+    // ✅ A) Add to favorites (duplicate check সহ)
+    app.post("/favorites", verifyToken, async (req, res) => {
+      const data = req.body;
+
+      if (!data?.mealId || !data?.mealName) {
+        return res.status(400).send({ message: "mealId & mealName required" });
       }
+
+      const userEmail = req.decoded.email;
+
+      // ✅ duplicate block
+      const exists = await favoritesCollection.findOne({ userEmail, mealId: data.mealId });
+      if (exists) {
+        return res.send({ insertedId: null, message: "Already in favorites" });
+      }
+
+      const doc = {
+        userEmail,
+        mealId: data.mealId,
+        mealName: data.mealName,
+        chefId: data.chefId || "",
+        chefName: data.chefName || "",
+        price: data.price || "",
+        addedTime: new Date().toISOString(),
+      };
+
+      const result = await favoritesCollection.insertOne(doc);
+      res.send({ insertedId: result.insertedId });
     });
 
-    // DELETE from favorites – নিজের ফেবারিট (verifyToken + email check)
-    app.delete('/favorites/:id', verifyToken, async (req, res) => {
-      const rawId = req.params.id;
-      const id = typeof rawId === 'string' ? rawId.trim() : rawId;
-      try {
-        let query;
-        if (typeof id === 'string' && ObjectId.isValid(id)) {
-          query = { _id: new ObjectId(id) };
-        } else {
-          query = { _id: id };
-        }
-        const found = await favoritesCollection.findOne(query);
-        if (!found) {
-          return res.status(404).json({ success: false, message: 'Favorite not found' });
-        }
-        if (found.userEmail !== req.decoded.email) {
-          return res.status(403).json({ success: false, message: 'Forbidden' });
-        }
-
-        const result = await favoritesCollection.deleteOne(query);
-        if (result.deletedCount > 0) {
-          res.status(200).json({ success: true, message: 'Favorite removed' });
-        } else {
-          res.status(404).json({ success: false, message: 'Favorite not found' });
-        }
-      } catch (err) {
-        console.error('DELETE /favorites error:', err);
-        res.status(500).json({ success: false, error: err.message });
-      }
+    // ✅ B) Get my favorites (secure) – replaces the old GET /my-favorites
+    app.get("/my-favorites", verifyToken, async (req, res) => {
+      const userEmail = req.decoded.email;
+      const favs = await favoritesCollection.find({ userEmail }).sort({ addedTime: -1 }).toArray();
+      res.send(favs);
     });
 
+    // ✅ C) Delete favorite
+    app.delete("/favorites/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const email = req.decoded.email;
+
+      const fav = await favoritesCollection.findOne({ _id: new ObjectId(id) });
+      if (!fav) return res.status(404).send({ message: "Not found" });
+
+      if (fav.userEmail !== email) return res.status(403).send({ message: "Forbidden" });
+
+      const result = await favoritesCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    // ================= ROLE REQUESTS =================
     // GET role requests – admin only
     app.get('/role-requests', verifyToken, verifyAdmin, async (req, res) => {
       try {
@@ -1100,6 +1082,45 @@ async function run() {
     // Test route
     app.get('/', (req, res) => {
       res.send('Hello World from Express + MongoDB!');
+    });
+
+    // ================= MY DASHBOARD ROUTES =================
+
+    // ✅ My Orders
+    app.get('/my-orders', verifyToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        const orders = await orderCollection
+          .find({ userEmail: email })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.send({ success: true, data: orders });
+      } catch (err) {
+        console.error('GET /my-orders error:', err);
+        res.status(500).json({ success: false, message: err.message });
+      }
+    });
+
+    // ✅ My Favorites – already replaced above, but we keep the comment for clarity
+    // (the actual route is the one above)
+
+    // ✅ My Reviews
+    app.get('/my-reviews', verifyToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+
+        const reviews = await reviewsCollection
+          .find({ reviewerEmail: email })
+          .sort({ date: -1 })
+          .toArray();
+
+        res.send({ success: true, data: reviews });
+      } catch (err) {
+        console.error('GET /my-reviews error:', err);
+        res.status(500).json({ success: false, message: err.message });
+      }
     });
 
     // ================= 404 Fallback (অজানা রুটের জন্য) =================
