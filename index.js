@@ -1265,7 +1265,7 @@ async function run() {
     });
 
   } finally {
-    // Do not close the connection
+    // Do not close the 
   }
 }
 
