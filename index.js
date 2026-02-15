@@ -54,6 +54,8 @@ async function run() {
     const reviewsCollection = database.collection('reviews');
     const favoritesCollection = database.collection('favorites');
     const orderCollection = database.collection('order_collection');
+    // ✅ payments collection যোগ করা হলো
+    const paymentsCollection = database.collection('payments');
 
     // Helper: convert ObjectId fields to strings for front-end
     const normalizeDoc = (doc) => {
@@ -503,35 +505,56 @@ async function run() {
       }
     });
 
-    // Stripe checkout session – public
-    app.post('/create-checkout-session', async (req, res) => {
-      if (!stripe) {
-        return res.status(500).json({ error: 'Stripe not configured' });
-      }
-      const { orderId, amount, email, name } = req.body;
+    // ========== ✅ 3) REPLACED STRIPE ROUTES (JWT protected) ==========
+
+    // ✅ Stripe checkout session – JWT protected + safe amount
+    app.post('/create-checkout-session', verifyToken, async (req, res) => {
+      if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
+
+      const { orderId } = req.body;
+      if (!orderId) return res.status(400).json({ error: 'orderId required' });
+
       try {
+        const order = await orderCollection.findOne({ _id: new ObjectId(orderId) });
+        if (!order) return res.status(404).json({ error: 'Order not found' });
+
+        // ✅ Only owner can pay
+        if (order.userEmail !== req.decoded.email) {
+          return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        // ✅ Pay only if accepted + pending (lowercase)
+        if (order.orderStatus !== 'accepted' || (order.paymentStatus || '').toLowerCase() !== 'pending') {
+          return res.status(400).json({ error: 'Payment not allowed for this order' });
+        }
+
+        // ✅ Never trust client amount
+        const amountUSD = Number(order.totalPrice || 0);
+        if (!amountUSD || amountUSD <= 0) {
+          return res.status(400).json({ error: 'Invalid order amount' });
+        }
+
+        const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5175';
+
         const session = await stripe.checkout.sessions.create({
           payment_method_types: ['card'],
           mode: 'payment',
-          customer_email: email,
+          customer_email: req.decoded.email,
           line_items: [
             {
               price_data: {
                 currency: 'usd',
-                product_data: {
-                  name: name || 'Food Order',
-                },
-                unit_amount: amount * 100,
+                product_data: { name: order.mealName || 'Food Order' },
+                unit_amount: Math.round(amountUSD * 100),
               },
               quantity: 1,
             },
           ],
-          metadata: {
-            orderId,
-          },
-          success_url: `https://localchefbazaarbyhakimcolor.netlify.app/dashbord/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `https://localchefbazaarbyhakimcolor.netlify.app/dashbord/payment-cancel`,
+          metadata: { orderId: String(orderId) },
+          success_url: `${FRONTEND_URL}/dashbord/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${FRONTEND_URL}/dashbord/payment-cancel`,
         });
+
         res.json({ url: session.url });
       } catch (err) {
         console.error(err);
@@ -539,35 +562,140 @@ async function run() {
       }
     });
 
-    // Verify payment – public (স্ট্রিপ কলব্যাক)
-    app.get('/verify-payment/:sessionId', async (req, res) => {
-      if (!stripe) {
-        return res.status(500).json({ error: 'Stripe not configured' });
-      }
+    // ✅ Verify payment – JWT protected + save history + update order
+    app.get('/verify-payment/:sessionId', verifyToken, async (req, res) => {
+      if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
+
       try {
         const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
-        if (session.payment_status === 'paid') {
-          const orderId = session.metadata.orderId;
-          await orderCollection.updateOne(
-            { _id: new ObjectId(orderId) },
-            {
-              $set: {
-                paymentStatus: 'paid',
-                paymentInfo: session,
-              },
-            }
-          );
-          return res.json({ success: true });
+
+        if (session.payment_status !== 'paid') {
+          return res.json({ success: false, message: 'Not paid' });
         }
-        res.json({ success: false });
+
+        const orderId = session?.metadata?.orderId;
+        if (!orderId) return res.status(400).json({ success: false, message: 'Missing orderId' });
+
+        const order = await orderCollection.findOne({ _id: new ObjectId(orderId) });
+        if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+        // ✅ Only owner can verify and update
+        if (order.userEmail !== req.decoded.email) {
+          return res.status(403).json({ success: false, message: 'Forbidden' });
+        }
+
+        // ✅ update order paid (lowercase)
+        await orderCollection.updateOne(
+          { _id: new ObjectId(orderId) },
+          {
+            $set: {
+              paymentStatus: 'paid',
+              paymentInfo: session,
+              transactionId: session.payment_intent || session.id,
+            },
+          }
+        );
+
+        // ✅ save payment history
+        await paymentsCollection.insertOne({
+          orderId: String(orderId),
+          userEmail: req.decoded.email,
+          transactionId: session.payment_intent || session.id,
+          amount: (session.amount_total || 0) / 100,
+          createdAt: new Date().toISOString(),
+        });
+
+        return res.json({ success: true });
       } catch (err) {
         console.error(err);
-        res.status(500).json({ success: false });
+        res.status(500).json({ success: false, message: 'Server error' });
       }
     });
 
-    // Update order status
-    app.patch('/update-order-status/:id', verifyToken, async (req, res) => {
+    // ================= 🔥 NEW CHEF-SPECIFIC ROUTES (added) =================
+    // ✅ Chef: get orders for this chef
+    app.get("/chef-orders/:chefId", verifyToken, verifyChef, async (req, res) => {
+      const chefId = req.params.chefId;
+      const orders = await orderCollection.find({ chefId }).sort({ orderTime: -1 }).toArray();
+      res.send(orders);
+    });
+
+    // ✅ Chef: accept an order (with ownership check)
+    app.patch("/orders/accept/:id", verifyToken, verifyChef, async (req, res) => {
+      const id = req.params.id;
+      const email = req.decoded.email;
+
+      // Find chef's own chefId from user collection
+      const chef = await userCollection.findOne({ email });
+      if (!chef || !chef.chefId) {
+        return res.status(403).send({ message: "Chef ID not found" });
+      }
+
+      const order = await orderCollection.findOne({ _id: new ObjectId(id) });
+      if (!order) return res.status(404).send({ message: "Order not found" });
+      if (order.chefId !== chef.chefId) {
+        return res.status(403).send({ message: "This order does not belong to you" });
+      }
+
+      const result = await orderCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { orderStatus: "accepted", paymentStatus: "pending" } } // lowercase 'pending'
+      );
+      res.send(result);
+    });
+
+    // ✅ Chef: cancel an order
+    app.patch("/orders/cancel/:id", verifyToken, verifyChef, async (req, res) => {
+      const id = req.params.id;
+      const email = req.decoded.email;
+
+      const chef = await userCollection.findOne({ email });
+      if (!chef || !chef.chefId) {
+        return res.status(403).send({ message: "Chef ID not found" });
+      }
+
+      const order = await orderCollection.findOne({ _id: new ObjectId(id) });
+      if (!order) return res.status(404).send({ message: "Order not found" });
+      if (order.chefId !== chef.chefId) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+
+      const result = await orderCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { orderStatus: "cancelled" } }
+      );
+      res.send(result);
+    });
+
+    // ✅ Chef: deliver an order (only if accepted)
+    app.patch("/orders/deliver/:id", verifyToken, verifyChef, async (req, res) => {
+      const id = req.params.id;
+      const email = req.decoded.email;
+
+      const chef = await userCollection.findOne({ email });
+      if (!chef || !chef.chefId) {
+        return res.status(403).send({ message: "Chef ID not found" });
+      }
+
+      const order = await orderCollection.findOne({ _id: new ObjectId(id) });
+      if (!order) return res.status(404).send({ message: "Order not found" });
+      if (order.chefId !== chef.chefId) {
+        return res.status(403).send({ message: "Forbidden" });
+      }
+      if (order.orderStatus !== "accepted") {
+        return res.status(400).send({ message: "Only accepted orders can be delivered" });
+      }
+
+      const result = await orderCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { orderStatus: "delivered" } }
+      );
+      res.send(result);
+    });
+
+    // ================= ✅ MODIFIED GENERIC ORDER STATUS UPDATE (admin only) =================
+    // (This route is now restricted to admin and uses lowercase paymentStatus)
+    app.patch('/update-order-status/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const id = req.params.id;
         const { orderStatus } = req.body;
@@ -578,10 +706,18 @@ async function run() {
             message: 'Invalid order status',
           });
         }
+
+        const updateFields = { orderStatus };
+        // Admin accept করলে paymentStatus automatically "pending" (lowercase)
+        if (orderStatus === 'accepted') {
+          updateFields.paymentStatus = 'pending';
+        }
+
         const result = await orderCollection.updateOne(
           { _id: new ObjectId(id) },
-          { $set: { orderStatus } }
+          { $set: updateFields }
         );
+
         if (result.modifiedCount > 0) {
           return res.send({
             success: true,
@@ -1086,14 +1222,14 @@ async function run() {
 
     // ================= MY DASHBOARD ROUTES =================
 
-    // ✅ My Orders
+    // ✅ My Orders – secure route, নিজের অর্ডার দেখায়
     app.get('/my-orders', verifyToken, async (req, res) => {
       try {
         const email = req.decoded.email;
 
         const orders = await orderCollection
           .find({ userEmail: email })
-          .sort({ createdAt: -1 })
+          .sort({ orderTime: -1 })   // orderTime দিয়ে sort (consistent রাখতে)
           .toArray();
 
         res.send({ success: true, data: orders });
@@ -1103,8 +1239,8 @@ async function run() {
       }
     });
 
-    // ✅ My Favorites – already replaced above, but we keep the comment for clarity
-    // (the actual route is the one above)
+    // ✅ My Favorites – already defined above, but we keep it here for clarity
+    // (already present as /my-favorites)
 
     // ✅ My Reviews
     app.get('/my-reviews', verifyToken, async (req, res) => {
