@@ -787,6 +787,7 @@ async function run() {
       }
     });
 
+    // ================= REVIEWS ROUTES =================
     // GET latest reviews (limit 6) – public
     app.get('/reviews/latest', async (req, res) => {
       try {
@@ -803,7 +804,7 @@ async function run() {
       }
     });
 
-    // GET reviews by mealId – public
+    // GET reviews by mealId (path param) – public
     app.get('/reviews/:mealId', async (req, res) => {
       const mealId = req.params.mealId;
       try {
@@ -819,68 +820,113 @@ async function run() {
       }
     });
 
+    // GET reviews by foodId (query param) – public
+    app.get('/reviews', async (req, res) => {
+      const { foodId } = req.query;
+      if (!foodId) {
+        return res.status(400).send({ message: "foodId required" });
+      }
+      try {
+        const reviews = await reviewsCollection
+          .find({ foodId })
+          .sort({ date: -1 })
+          .toArray();
+        const normalized = reviews.map((r) => normalizeDoc(r));
+        res.send(normalized); // সরাসরি অ্যারে রিটার্ন (প্রদত্ত স্পেক অনুযায়ী)
+      } catch (err) {
+        console.error('GET /reviews?foodId error:', err);
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    // GET my reviews – নিজের সব রিভিউ
+    app.get('/my-reviews', verifyToken, async (req, res) => {
+      const email = req.decoded.email;
+      try {
+        const reviews = await reviewsCollection
+          .find({ reviewerEmail: email })
+          .sort({ date: -1 })
+          .toArray();
+        const normalized = reviews.map((r) => normalizeDoc(r));
+        res.send(normalized);
+      } catch (err) {
+        console.error('GET /my-reviews error:', err);
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
     // POST create review – লগইন যেকোনো ইউজার (verifyToken)
     app.post('/reviews', verifyToken, async (req, res) => {
       const review = req.body;
+
+      // basic validation
+      if (!review.foodId || !review.rating || !review.comment) {
+        return res.status(400).send({ message: "foodId, rating, comment required" });
+      }
+
+      const doc = {
+        foodId: review.foodId,
+        reviewerName: review.reviewerName || "Anonymous",
+        reviewerImage: review.reviewerImage || "",
+        rating: Number(review.rating),
+        comment: review.comment,
+        reviewerEmail: req.decoded.email,       // ✅ secure
+        date: new Date().toISOString(),
+      };
+
       try {
-        const result = await reviewsCollection.insertOne(review);
-        res.status(201).json({
-          success: true,
-          data: { ...review, _id: result.insertedId.toString() },
-        });
+        const result = await reviewsCollection.insertOne(doc);
+        res.send({ insertedId: result.insertedId });
       } catch (err) {
         console.error('POST /reviews error:', err);
         res.status(500).json({ success: false, error: err.message });
       }
     });
 
-    // PATCH update review – নিজের রিভিউ (verifyToken + email check)
-    app.patch('/reviewsup/:id', verifyToken, async (req, res) => {
-      const rawId = req.params.id;
-      const id = typeof rawId === 'string' ? rawId.trim() : rawId;
+    // PATCH update review – শুধু মালিক
+    app.patch('/reviews/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
       const { rating, comment } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).send({ message: "Invalid review ID" });
+      }
+
       try {
-        const updates = {};
-        if (rating !== undefined) updates.rating = Number(rating);
-        if (comment !== undefined) updates.comment = comment;
-
-        const queries = [];
-        if (typeof id === 'string' && ObjectId.isValid(id)) {
-          queries.push({ _id: new ObjectId(id) });
-        }
-        queries.push({ _id: id });
-        const matchQuery = queries.length > 1 ? { $or: queries } : queries[0];
-
-        const found = await reviewsCollection.findOne(matchQuery);
-        if (!found) {
-          return res.status(404).json({ success: false, message: 'Review not found' });
-        }
-        // check ownership
-        if (found.reviewerEmail !== req.decoded.email) {
-          return res.status(403).json({ success: false, message: 'Forbidden' });
+        const existing = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+        if (!existing) {
+          return res.status(404).send({ message: "Not found" });
         }
 
-        const dbId = found._id;
-        const updated = await reviewsCollection.findOneAndUpdate(
-          { _id: dbId },
-          { $set: updates },
-          { returnDocument: 'after' }
+        if (existing.reviewerEmail !== req.decoded.email) {
+          return res.status(403).send({ message: "Forbidden" });
+        }
+
+        const updateDoc = {
+          $set: {
+            rating: Number(rating),
+            comment,
+            date: new Date().toISOString(),
+          },
+        };
+
+        const result = await reviewsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          updateDoc
         );
-        if (!updated.value) {
-          return res.status(500).json({ success: false, message: 'Update failed' });
-        }
-        const review = normalizeDoc(updated.value);
-        res.status(200).json({ success: true, updatedReview: review });
+
+        res.send(result);
       } catch (err) {
-        console.error('PATCH /reviewsup error:', err);
+        console.error('PATCH /reviews/:id error:', err);
         res.status(500).json({ success: false, error: err.message });
       }
     });
 
-    // DELETE review – নিজের রিভিউ (verifyToken + email check)
+    // DELETE review – শুধু মালিক
     app.delete('/reviews/:id', verifyToken, async (req, res) => {
       const rawId = req.params.id;
       const id = typeof rawId === 'string' ? rawId.trim() : rawId;
+
       try {
         let query;
         if (typeof id === 'string' && ObjectId.isValid(id)) {
@@ -888,25 +934,25 @@ async function run() {
         } else {
           query = { _id: id };
         }
-        const found = await reviewsCollection.findOne(query);
-        if (!found) {
-          return res.status(404).json({ success: false, message: 'Review not found' });
+
+        const existing = await reviewsCollection.findOne(query);
+        if (!existing) {
+          return res.status(404).send({ message: "Not found" });
         }
-        if (found.reviewerEmail !== req.decoded.email) {
-          return res.status(403).json({ success: false, message: 'Forbidden' });
+
+        if (existing.reviewerEmail !== req.decoded.email) {
+          return res.status(403).send({ message: "Forbidden" });
         }
 
         const result = await reviewsCollection.deleteOne(query);
-        if (result.deletedCount === 1) {
-          res.status(200).json({ success: true, message: 'Review deleted successfully' });
-        } else {
-          res.status(404).json({ success: false, message: 'Review not found' });
-        }
+        res.send(result); // { acknowledged: true, deletedCount: 1 }
       } catch (err) {
         console.error('DELETE /reviews error:', err);
         res.status(500).json({ success: false, error: err.message });
       }
     });
+
+    // ===== পূর্বের PATCH /reviewsup/:id সরিয়ে দেওয়া হয়েছে (এখন /reviews/:id ব্যবহার করুন) =====
 
     // POST add to favorites – লগইন যেকোনো ইউজার
     app.post('/favorites', verifyToken, async (req, res) => {
