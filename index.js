@@ -19,9 +19,10 @@ app.use(
     origin: function (origin, callback) {
       if (!origin) return callback(null, true);
       if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(null, false);
+      // return an error when origin is not allowed – no silent failure
+      return callback(new Error("Not allowed by CORS"), false);
     },
-    credentials: true, // cookie পাঠানোর জন্য বাধ্যতামূলক
+    credentials: true, // required for cookies
   })
 );
 
@@ -34,6 +35,16 @@ const stripe = stripeKey ? require("stripe")(stripeKey) : null;
 
 const port = process.env.PORT || 5000;
 const uri = process.env.MONGO_URI;
+
+// ================= Environment Variables Check =================
+if (!process.env.MONGO_URI) {
+  console.error("❌ MONGO_URI missing in .env");
+  process.exit(1);
+}
+if (!process.env.ACCESS_TOKEN_SECRET) {
+  console.error("❌ ACCESS_TOKEN_SECRET missing in .env");
+  process.exit(1);
+}
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -54,7 +65,6 @@ async function run() {
     const reviewsCollection = database.collection('reviews');
     const favoritesCollection = database.collection('favorites');
     const orderCollection = database.collection('order_collection');
-    // ✅ payments collection যোগ করা হলো
     const paymentsCollection = database.collection('payments');
 
     // Helper: convert ObjectId fields to strings for front-end
@@ -70,11 +80,11 @@ async function run() {
     const verifyToken = (req, res, next) => {
       const token = req.cookies?.token;
       if (!token) {
-        return res.status(401).send({ message: "Unauthorized access" });
+        return res.status(401).send({ success: false, message: "Unauthorized" });
       }
       jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
         if (err) {
-          return res.status(401).send({ message: "Unauthorized access" });
+          return res.status(403).send({ success: false, message: "Forbidden access" });
         }
         req.decoded = decoded; // { email }
         next();
@@ -100,22 +110,25 @@ async function run() {
       next();
     };
 
-    // ================= JWT (LOGIN) – সরল সংস্করণ (ডাটাবেজ চেক ছাড়া) =================
+    // ================= JWT (LOGIN) - cookie set =================
     app.post("/jwt", (req, res) => {
-      const user = req.body; // { email: ... }
-      if (!user?.email) {
-        return res.status(400).send({ message: "email required" });
+      const { email } = req.body;
+
+      if (!email) {
+        return res.status(400).send({ success: false, message: "Email required" });
       }
 
-      const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, {
-        expiresIn: "7d",
-      });
+      const token = jwt.sign(
+        { email },
+        process.env.ACCESS_TOKEN_SECRET,
+        { expiresIn: "1d" }
+      );
 
       res
         .cookie("token", token, {
           httpOnly: true,
-          secure: false,      // localhost এ false
-          sameSite: "lax",    // localhost এ lax ok
+          secure: false,   // for localhost
+          sameSite: "lax",
         })
         .send({ success: true });
     });
@@ -131,7 +144,7 @@ async function run() {
         .send({ success: true });
     });
 
-    // ================= অন্যান্য রাউটসমূহ =================
+    // ================= OTHER ROUTES (with email normalization) =================
     // GET all users – admin only
     app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
       try {
@@ -147,7 +160,7 @@ async function run() {
       }
     });
 
-    // GET all admins – admin only (optional, but safe)
+    // GET all admins – admin only
     app.get('/users/admins', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const admins = await userCollection
@@ -183,16 +196,16 @@ async function run() {
       }
     });
 
-    // ========== রোল চেক – শুধু নিজের ইমেইল দেখতে পারবে ==========
-    // এই রাউটটি /users/:email এর আগে থাকতে হবে
+    // ========== রোল চেক – নিজের ইমেইল দেখার অনুমতি ==========
     app.get("/users/role/:email", verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).send({ message: "Forbidden access" });
       }
 
       const user = await userCollection.findOne(
-        { email: email },
+        { email: paramEmail },
         { projection: { role: 1, status: 1, chefId: 1, email: 1, name: 1 } }
       );
 
@@ -209,12 +222,13 @@ async function run() {
 
     // GET user by email (own data only)
     app.get('/users/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
-        const user = await userCollection.findOne({ email: email });
+        const user = await userCollection.findOne({ email: paramEmail });
         if (user) {
           return res.status(200).json({ success: true, data: user });
         } else {
@@ -255,13 +269,14 @@ async function run() {
 
     // GET orders by user email (own orders)
     app.get('/orders/:userEmail', verifyToken, async (req, res) => {
-      const email = req.params.userEmail;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.userEmail).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
         const orders = await orderCollection
-          .find({ userEmail: email })
+          .find({ userEmail: paramEmail })
           .sort({ orderTime: -1 })
           .toArray();
         const normalizedOrders = orders.map((order) => ({
@@ -276,10 +291,11 @@ async function run() {
       }
     });
 
-    // GET user-chef orders (for a chef's meals) – chef himself
+    // ========== ইউজার-শেফ অর্ডার (ইমেইল ম্যাচ চেক সহ) – already fixed ==========
     app.get('/user-chef-orders/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const email = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = req.decoded?.email?.toLowerCase() || '';
+      if (decodedEmail !== email) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
@@ -287,7 +303,7 @@ async function run() {
           .find({ userEmail: email })
           .toArray();
         if (!userMeals.length) {
-          return res.status(404).json({ success: false, message: 'No meals found for this user' });
+          return res.status(200).json({ success: true, data: [] });
         }
         const chefIds = userMeals.map((meal) => meal.chefId);
         const orders = await orderCollection
@@ -308,12 +324,13 @@ async function run() {
 
     // GET chef-id by email (from meals) – chef himself
     app.get('/chef-id/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
-        const meal = await mealsCollection.findOne({ userEmail: email });
+        const meal = await mealsCollection.findOne({ userEmail: paramEmail });
         if (!meal) return res.send({ chefId: null });
         res.send({ chefId: meal.chefId || null });
       } catch (err) {
@@ -324,12 +341,13 @@ async function run() {
 
     // GET user meals by email (own meals) – chef himself
     app.get('/user-meals/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
-        const meals = await mealsCollection.find({ userEmail: email }).toArray();
+        const meals = await mealsCollection.find({ userEmail: paramEmail }).toArray();
         const normalized = meals.map((m) => ({
           ...m,
           _id: m._id?.toString ? m._id.toString() : m._id,
@@ -343,13 +361,14 @@ async function run() {
 
     // GET user reviews by email (own reviews)
     app.get('/user-reviews/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
         const userReviews = await reviewsCollection
-          .find({ reviewerEmail: email })
+          .find({ reviewerEmail: paramEmail })
           .sort({ date: -1 })
           .toArray();
         const normalized = userReviews.map((r) => normalizeDoc(r));
@@ -362,13 +381,14 @@ async function run() {
 
     // GET favorites by email (own favorites)
     app.get('/favorites/:email', verifyToken, async (req, res) => {
-      const email = req.params.email;
-      if (req.decoded.email !== email) {
+      const paramEmail = decodeURIComponent(req.params.email).toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== paramEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       try {
         const favorites = await favoritesCollection
-          .find({ userEmail: email })
+          .find({ userEmail: paramEmail })
           .toArray();
         const normalized = favorites.map((f) => normalizeDoc(f));
         res.status(200).json({ success: true, data: normalized });
@@ -381,7 +401,12 @@ async function run() {
     // POST role request (become chef/admin) – নিজের অনুরোধ
     app.post('/role-request', verifyToken, async (req, res) => {
       const { email, requestedRole } = req.body;
-      if (req.decoded.email !== email) {
+      if (!email || !requestedRole) {
+        return res.status(400).json({ success: false, message: 'Email and requestedRole required' });
+      }
+      const reqEmail = email.toLowerCase();
+      const decodedEmail = (req.decoded?.email || "").toLowerCase();
+      if (decodedEmail !== reqEmail) {
         return res.status(403).json({ success: false, message: 'Forbidden access' });
       }
       if (!['chef', 'admin'].includes(requestedRole)) {
@@ -389,7 +414,7 @@ async function run() {
       }
       try {
         const updated = await userCollection.findOneAndUpdate(
-          { email },
+          { email: reqEmail },
           { $set: { roleRequest: requestedRole } },
           { returnDocument: 'after' }
         );
@@ -405,9 +430,9 @@ async function run() {
     });
 
     // ================= PUBLIC ROUTES =================
-    // Check role by email (used for initial auth check) – public, কিন্তু token চেক করা হয় না
+    // Check role by email (used for initial auth check) – public
     app.get('/check-role/:email', async (req, res) => {
-      const email = req.params.email;
+      const email = decodeURIComponent(req.params.email).toLowerCase();
       try {
         const user = await userCollection.findOne({ email });
         if (!user) {
@@ -505,9 +530,8 @@ async function run() {
       }
     });
 
-    // ========== ✅ 3) REPLACED STRIPE ROUTES (JWT protected) ==========
-
-    // ✅ Stripe checkout session – JWT protected + safe amount
+    // ========== STRIPE ROUTES (JWT protected) ==========
+    // Stripe checkout session – JWT protected + safe amount
     app.post('/create-checkout-session', verifyToken, async (req, res) => {
       if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
 
@@ -518,17 +542,16 @@ async function run() {
         const order = await orderCollection.findOne({ _id: new ObjectId(orderId) });
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
-        // ✅ Only owner can pay
-        if (order.userEmail !== req.decoded.email) {
+        // Only owner can pay
+        if (order.userEmail.toLowerCase() !== req.decoded.email.toLowerCase()) {
           return res.status(403).json({ error: 'Forbidden' });
         }
 
-        // ✅ Pay only if accepted + pending (lowercase)
+        // Pay only if accepted + pending
         if (order.orderStatus !== 'accepted' || (order.paymentStatus || '').toLowerCase() !== 'pending') {
           return res.status(400).json({ error: 'Payment not allowed for this order' });
         }
 
-        // ✅ Never trust client amount
         const amountUSD = Number(order.totalPrice || 0);
         if (!amountUSD || amountUSD <= 0) {
           return res.status(400).json({ error: 'Invalid order amount' });
@@ -562,7 +585,7 @@ async function run() {
       }
     });
 
-    // ✅ Verify payment – JWT protected + save history + update order
+    // Verify payment – JWT protected + save history + update order
     app.get('/verify-payment/:sessionId', verifyToken, async (req, res) => {
       if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
 
@@ -579,12 +602,12 @@ async function run() {
         const order = await orderCollection.findOne({ _id: new ObjectId(orderId) });
         if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
 
-        // ✅ Only owner can verify and update
-        if (order.userEmail !== req.decoded.email) {
+        // Only owner can verify and update
+        if (order.userEmail.toLowerCase() !== req.decoded.email.toLowerCase()) {
           return res.status(403).json({ success: false, message: 'Forbidden' });
         }
 
-        // ✅ update order paid (lowercase)
+        // update order paid
         await orderCollection.updateOne(
           { _id: new ObjectId(orderId) },
           {
@@ -596,7 +619,7 @@ async function run() {
           }
         );
 
-        // ✅ save payment history
+        // save payment history
         await paymentsCollection.insertOne({
           orderId: String(orderId),
           userEmail: req.decoded.email,
@@ -612,20 +635,19 @@ async function run() {
       }
     });
 
-    // ================= 🔥 NEW CHEF-SPECIFIC ROUTES (added) =================
-    // ✅ Chef: get orders for this chef
+    // ================= CHEF-SPECIFIC ROUTES =================
+    // Chef: get orders for this chef
     app.get("/chef-orders/:chefId", verifyToken, verifyChef, async (req, res) => {
       const chefId = req.params.chefId;
       const orders = await orderCollection.find({ chefId }).sort({ orderTime: -1 }).toArray();
       res.send(orders);
     });
 
-    // ✅ Chef: accept an order (with ownership check)
+    // Chef: accept an order (with ownership check)
     app.patch("/orders/accept/:id", verifyToken, verifyChef, async (req, res) => {
       const id = req.params.id;
       const email = req.decoded.email;
 
-      // Find chef's own chefId from user collection
       const chef = await userCollection.findOne({ email });
       if (!chef || !chef.chefId) {
         return res.status(403).send({ message: "Chef ID not found" });
@@ -639,12 +661,12 @@ async function run() {
 
       const result = await orderCollection.updateOne(
         { _id: new ObjectId(id) },
-        { $set: { orderStatus: "accepted", paymentStatus: "pending" } } // lowercase 'pending'
+        { $set: { orderStatus: "accepted", paymentStatus: "pending" } }
       );
       res.send(result);
     });
 
-    // ✅ Chef: cancel an order
+    // Chef: cancel an order
     app.patch("/orders/cancel/:id", verifyToken, verifyChef, async (req, res) => {
       const id = req.params.id;
       const email = req.decoded.email;
@@ -667,7 +689,7 @@ async function run() {
       res.send(result);
     });
 
-    // ✅ Chef: deliver an order (only if accepted)
+    // Chef: deliver an order (only if accepted)
     app.patch("/orders/deliver/:id", verifyToken, verifyChef, async (req, res) => {
       const id = req.params.id;
       const email = req.decoded.email;
@@ -693,8 +715,7 @@ async function run() {
       res.send(result);
     });
 
-    // ================= ✅ MODIFIED GENERIC ORDER STATUS UPDATE (admin only) =================
-    // (This route is now restricted to admin and uses lowercase paymentStatus)
+    // ================= MODIFIED GENERIC ORDER STATUS UPDATE (admin only) =================
     app.patch('/update-order-status/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const id = req.params.id;
@@ -708,7 +729,6 @@ async function run() {
         }
 
         const updateFields = { orderStatus };
-        // Admin accept করলে paymentStatus automatically "pending" (lowercase)
         if (orderStatus === 'accepted') {
           updateFields.paymentStatus = 'pending';
         }
@@ -968,7 +988,7 @@ async function run() {
           .sort({ date: -1 })
           .toArray();
         const normalized = reviews.map((r) => normalizeDoc(r));
-        res.send(normalized); // সরাসরি অ্যারে রিটার্ন
+        res.send(normalized);
       } catch (err) {
         console.error('GET /reviews?foodId error:', err);
         res.status(500).json({ success: false, error: err.message });
@@ -1017,7 +1037,7 @@ async function run() {
           return res.status(404).send({ message: "Not found" });
         }
 
-        if (existing.reviewerEmail !== req.decoded.email) {
+        if (existing.reviewerEmail.toLowerCase() !== req.decoded.email.toLowerCase()) {
           return res.status(403).send({ message: "Forbidden" });
         }
 
@@ -1059,7 +1079,7 @@ async function run() {
           return res.status(404).send({ message: "Not found" });
         }
 
-        if (existing.reviewerEmail !== req.decoded.email) {
+        if (existing.reviewerEmail.toLowerCase() !== req.decoded.email.toLowerCase()) {
           return res.status(403).send({ message: "Forbidden" });
         }
 
@@ -1071,9 +1091,8 @@ async function run() {
       }
     });
 
-    // ================= FAVORITES ROUTES (UPDATED) =================
-
-    // ✅ A) Add to favorites (duplicate check সহ)
+    // ================= FAVORITES ROUTES =================
+    // Add to favorites (duplicate check সহ)
     app.post("/favorites", verifyToken, async (req, res) => {
       const data = req.body;
 
@@ -1083,7 +1102,6 @@ async function run() {
 
       const userEmail = req.decoded.email;
 
-      // ✅ duplicate block
       const exists = await favoritesCollection.findOne({ userEmail, mealId: data.mealId });
       if (exists) {
         return res.send({ insertedId: null, message: "Already in favorites" });
@@ -1103,14 +1121,14 @@ async function run() {
       res.send({ insertedId: result.insertedId });
     });
 
-    // ✅ B) Get my favorites (secure) – replaces the old GET /my-favorites
+    // Get my favorites (secure)
     app.get("/my-favorites", verifyToken, async (req, res) => {
       const userEmail = req.decoded.email;
       const favs = await favoritesCollection.find({ userEmail }).sort({ addedTime: -1 }).toArray();
       res.send(favs);
     });
 
-    // ✅ C) Delete favorite
+    // Delete favorite
     app.delete("/favorites/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
       const email = req.decoded.email;
@@ -1118,7 +1136,7 @@ async function run() {
       const fav = await favoritesCollection.findOne({ _id: new ObjectId(id) });
       if (!fav) return res.status(404).send({ message: "Not found" });
 
-      if (fav.userEmail !== email) return res.status(403).send({ message: "Forbidden" });
+      if (fav.userEmail.toLowerCase() !== email.toLowerCase()) return res.status(403).send({ message: "Forbidden" });
 
       const result = await favoritesCollection.deleteOne({ _id: new ObjectId(id) });
       res.send(result);
@@ -1221,17 +1239,14 @@ async function run() {
     });
 
     // ================= MY DASHBOARD ROUTES =================
-
-    // ✅ My Orders – secure route, নিজের অর্ডার দেখায়
+    // My Orders – secure route
     app.get('/my-orders', verifyToken, async (req, res) => {
       try {
         const email = req.decoded.email;
-
         const orders = await orderCollection
           .find({ userEmail: email })
-          .sort({ orderTime: -1 })   // orderTime দিয়ে sort (consistent রাখতে)
+          .sort({ orderTime: -1 })
           .toArray();
-
         res.send({ success: true, data: orders });
       } catch (err) {
         console.error('GET /my-orders error:', err);
@@ -1239,19 +1254,14 @@ async function run() {
       }
     });
 
-    // ✅ My Favorites – already defined above, but we keep it here for clarity
-    // (already present as /my-favorites)
-
-    // ✅ My Reviews
+    // My Reviews
     app.get('/my-reviews', verifyToken, async (req, res) => {
       try {
         const email = req.decoded.email;
-
         const reviews = await reviewsCollection
           .find({ reviewerEmail: email })
           .sort({ date: -1 })
           .toArray();
-
         res.send({ success: true, data: reviews });
       } catch (err) {
         console.error('GET /my-reviews error:', err);
@@ -1265,12 +1275,18 @@ async function run() {
     });
 
   } finally {
-    // Do not close the 
+    // Do not close the client here; keep connection alive.
   }
 }
 
-run().catch(console.dir);
-
-app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
+// ================= সার্ভার চালু করার সঠিক উপায় =================
+run()
+  .then(() => {
+    app.listen(port, () => {
+      console.log(`✅ Server is running on port ${port}`);
+    });
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB connection failed:", err?.message || err);
+    process.exit(1);
+  });
