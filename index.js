@@ -1,10 +1,14 @@
-const express = require('express');
-const cors = require('cors');
+const express = require("express");
+const cors = require("cors");
 const cookieParser = require("cookie-parser");
-const jwt = require('jsonwebtoken');
-require('dotenv').config();
+const jwt = require("jsonwebtoken");
+require("dotenv").config();
 
 const app = express();
+
+// ✅ MUST middlewares (cookie + body)
+app.use(cookieParser());
+app.use(express.json());
 
 // ================= CORS =================
 const allowedOrigins = [
@@ -28,8 +32,15 @@ app.use(
   })
 );
 
-app.use(cookieParser());
-app.use(express.json());
+// ✅ preflight fix (no crash)
+app.options(/.*/, cors());
+
+// ✅ for secure cookies behind proxy (vercel)
+app.set("trust proxy", 1);
+
+
+// app.use(cookieParser());
+// app.use(express.json());
 
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const stripeKey = process.env.STRIPE_SECRET_KEY;
@@ -112,43 +123,38 @@ async function run() {
       next();
     };
 
-    // ================= JWT (LOGIN) - cookie set (production safe) =================
-    app.post("/jwt", (req, res) => {
-      const { email } = req.body;
+    // ================= JWT (LOGIN) =================
+app.post("/jwt", (req, res) => {
+  const { email } = req.body || {};
 
-      if (!email) {
-        return res.status(400).send({ success: false, message: "Email required" });
-      }
+  if (!email) {
+    return res.status(400).send({ success: false, message: "Email required" });
+  }
 
-      const token = jwt.sign(
-        { email },
-        process.env.ACCESS_TOKEN_SECRET,
-        { expiresIn: "1d" }
-      );
+  const token = jwt.sign({ email }, process.env.ACCESS_TOKEN_SECRET, {
+    expiresIn: "1d",
+  });
 
-      const isProd = process.env.NODE_ENV === "production";
+  res
+    .cookie("token", token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+    })
+    .send({ success: true });
+});
 
-      res
-        .cookie("token", token, {
-          httpOnly: true,
-          secure: isProd,
-          sameSite: isProd ? "none" : "lax",
-        })
-        .send({ success: true });
-    });
+// ================= LOGOUT =================
+app.post("/logout", (req, res) => {
+  res
+    .clearCookie("token", {
+      httpOnly: true,
+      secure: true,
+      sameSite: "none",
+    })
+    .send({ success: true });
+});
 
-    // ================= LOGOUT (production safe) =================
-    app.post("/logout", (req, res) => {
-      const isProd = process.env.NODE_ENV === "production";
-
-      res
-        .clearCookie("token", {
-          httpOnly: true,
-          secure: isProd,
-          sameSite: isProd ? "none" : "lax",
-        })
-        .send({ success: true });
-    });
 
     // ================= OTHER ROUTES (with email normalization) =================
     // GET all users – admin only
