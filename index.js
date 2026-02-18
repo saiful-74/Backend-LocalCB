@@ -27,6 +27,8 @@ app.use(
     credentials: true,
   })
 );
+// app.options("*", cors());
+
 
 app.use(cookieParser());
 app.use(express.json());
@@ -128,12 +130,13 @@ async function run() {
 
       const isProd = process.env.NODE_ENV === "production";
 
-      res
-        .cookie("token", token, {
-          httpOnly: true,
-          secure: isProd,
-          sameSite: isProd ? "none" : "lax",
-        })
+      res.cookie("token", token, {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? "none" : "lax",
+  maxAge: 24 * 60 * 60 * 1000, // 1 day
+  path: "/",                  // important
+})
         .send({ success: true });
     });
 
@@ -141,12 +144,12 @@ async function run() {
     app.post("/logout", (req, res) => {
       const isProd = process.env.NODE_ENV === "production";
 
-      res
-        .clearCookie("token", {
-          httpOnly: true,
-          secure: isProd,
-          sameSite: isProd ? "none" : "lax",
-        })
+      res.clearCookie("token", {
+  httpOnly: true,
+  secure: isProd,
+  sameSite: isProd ? "none" : "lax",
+  path: "/", // important
+})
         .send({ success: true });
     });
 
