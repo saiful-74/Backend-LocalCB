@@ -801,7 +801,10 @@ async function run() {
           queries.push({ _id: new ObjectId(id) });
         }
         queries.push({ _id: id });
-        const matchQuery = queries.length > 1 ? { $or: queries } : queries[0];
+        const matchQuery = ObjectId.isValid(id)
+  ? { _id: new ObjectId(id) }
+  : { _id: id };
+
 
         const updatedMeal = await mealsCollection.findOneAndUpdate(
           matchQuery,
